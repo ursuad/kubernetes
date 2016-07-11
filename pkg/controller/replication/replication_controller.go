@@ -1,5 +1,5 @@
 /*
-Copyright 2014 The Kubernetes Authors All rights reserved.
+Copyright 2014 The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -47,7 +47,11 @@ const (
 	// We'll attempt to recompute the required replicas of all replication controllers
 	// that have fulfilled their expectations at least this often. This recomputation
 	// happens based on contents in local pod storage.
-	FullControllerResyncPeriod = 30 * time.Second
+	// Full Resync shouldn't be needed at all in a healthy system. This is a protection
+	// against disappearing objects and watch notification, that we believe should not
+	// happen at all.
+	// TODO: We should get rid of it completely in the fullness of time.
+	FullControllerResyncPeriod = 10 * time.Minute
 
 	// Realistic value of the burstReplica field for the replication manager based off
 	// performance requirements for kubernetes 1.0.
@@ -349,12 +353,9 @@ func (rm *ReplicationManager) updatePod(old, cur interface{}) {
 		return
 	}
 	curPod := cur.(*api.Pod)
-	rc := rm.getPodController(curPod)
-	if rc == nil {
-		return
-	}
 	oldPod := old.(*api.Pod)
-
+	glog.V(4).Infof("Pod %s updated, objectMeta %+v -> %+v.", curPod.Name, oldPod.ObjectMeta, curPod.ObjectMeta)
+	labelChanged := !reflect.DeepEqual(curPod.Labels, oldPod.Labels)
 	if curPod.DeletionTimestamp != nil {
 		// when a pod is deleted gracefully it's deletion timestamp is first modified to reflect a grace period,
 		// and after such time has passed, the kubelet actually deletes it from the store. We receive an update
@@ -362,11 +363,18 @@ func (rm *ReplicationManager) updatePod(old, cur interface{}) {
 		// until the kubelet actually deletes the pod. This is different from the Phase of a pod changing, because
 		// an rc never initiates a phase change, and so is never asleep waiting for the same.
 		rm.deletePod(curPod)
+		if labelChanged {
+			// we don't need to check the oldPod.DeletionTimestamp because DeletionTimestamp cannot be unset.
+			rm.deletePod(oldPod)
+		}
 		return
 	}
-	rm.enqueueController(rc)
+
+	if rc := rm.getPodController(curPod); rc != nil {
+		rm.enqueueController(rc)
+	}
 	// Only need to get the old controller if the labels changed.
-	if !reflect.DeepEqual(curPod.Labels, oldPod.Labels) {
+	if labelChanged {
 		// If the old and new rc are the same, the first one that syncs
 		// will set expectations preventing any damage from the second.
 		if oldRC := rm.getPodController(oldPod); oldRC != nil {
@@ -467,21 +475,22 @@ func (rm *ReplicationManager) manageReplicas(filteredPods []*api.Pod, rc *api.Re
 		// into a performance bottleneck. We should generate a UID for the pod
 		// beforehand and store it via ExpectCreations.
 		rm.expectations.ExpectCreations(rcKey, diff)
-		wait := sync.WaitGroup{}
-		wait.Add(diff)
+		var wg sync.WaitGroup
+		wg.Add(diff)
 		glog.V(2).Infof("Too few %q/%q replicas, need %d, creating %d", rc.Namespace, rc.Name, rc.Spec.Replicas, diff)
 		for i := 0; i < diff; i++ {
 			go func() {
-				defer wait.Done()
+				defer wg.Done()
 				if err := rm.podControl.CreatePods(rc.Namespace, rc.Spec.Template, rc); err != nil {
 					// Decrement the expected number of creates because the informer won't observe this pod
 					glog.V(2).Infof("Failed creation, decrementing expectations for controller %q/%q", rc.Namespace, rc.Name)
 					rm.expectations.CreationObserved(rcKey)
+					rm.enqueueController(rc)
 					utilruntime.HandleError(err)
 				}
 			}()
 		}
-		wait.Wait()
+		wg.Wait()
 	} else if diff > 0 {
 		if diff > rm.burstReplicas {
 			diff = rm.burstReplicas
@@ -508,21 +517,22 @@ func (rm *ReplicationManager) manageReplicas(filteredPods []*api.Pod, rc *api.Re
 		// labels on a pod/rc change in a way that the pod gets orphaned, the
 		// rc will only wake up after the expectation has expired.
 		rm.expectations.ExpectDeletions(rcKey, deletedPodKeys)
-		wait := sync.WaitGroup{}
-		wait.Add(diff)
+		var wg sync.WaitGroup
+		wg.Add(diff)
 		for i := 0; i < diff; i++ {
 			go func(ix int) {
-				defer wait.Done()
+				defer wg.Done()
 				if err := rm.podControl.DeletePod(rc.Namespace, filteredPods[ix].Name, rc); err != nil {
 					// Decrement the expected number of deletes because the informer won't observe this deletion
 					podKey := controller.PodKey(filteredPods[ix])
 					glog.V(2).Infof("Failed to delete %v due to %v, decrementing expectations for controller %q/%q", podKey, err, rc.Namespace, rc.Name)
 					rm.expectations.DeletionObserved(rcKey, podKey)
+					rm.enqueueController(rc)
 					utilruntime.HandleError(err)
 				}
 			}(i)
 		}
-		wait.Wait()
+		wg.Wait()
 	}
 }
 

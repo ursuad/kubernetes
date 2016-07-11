@@ -1,5 +1,5 @@
 /*
-Copyright 2016 The Kubernetes Authors All rights reserved.
+Copyright 2016 The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -51,7 +51,7 @@ func StartCompactor(ctx context.Context, client *clientv3.Client) {
 	var emptyStruct struct{}
 	for _, ep := range client.Endpoints() {
 		if _, ok := endpointsMap[ep]; ok {
-			glog.V(4).Infof("compactor already exists for endpoints %v")
+			glog.V(4).Infof("compactor already exists for endpoints %v", client.Endpoints())
 			return
 		}
 	}

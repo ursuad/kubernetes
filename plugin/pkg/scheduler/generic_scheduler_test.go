@@ -1,5 +1,5 @@
 /*
-Copyright 2014 The Kubernetes Authors All rights reserved.
+Copyright 2014 The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -19,7 +19,6 @@ package scheduler
 import (
 	"fmt"
 	"math"
-	"math/rand"
 	"reflect"
 	"strconv"
 	"testing"
@@ -34,15 +33,15 @@ import (
 	"k8s.io/kubernetes/plugin/pkg/scheduler/schedulercache"
 )
 
-func falsePredicate(pod *api.Pod, nodeInfo *schedulercache.NodeInfo) (bool, error) {
+func falsePredicate(pod *api.Pod, meta interface{}, nodeInfo *schedulercache.NodeInfo) (bool, error) {
 	return false, algorithmpredicates.ErrFakePredicate
 }
 
-func truePredicate(pod *api.Pod, nodeInfo *schedulercache.NodeInfo) (bool, error) {
+func truePredicate(pod *api.Pod, meta interface{}, nodeInfo *schedulercache.NodeInfo) (bool, error) {
 	return true, nil
 }
 
-func matchesPredicate(pod *api.Pod, nodeInfo *schedulercache.NodeInfo) (bool, error) {
+func matchesPredicate(pod *api.Pod, meta interface{}, nodeInfo *schedulercache.NodeInfo) (bool, error) {
 	node := nodeInfo.Node()
 	if node == nil {
 		return false, fmt.Errorf("node not found")
@@ -53,7 +52,7 @@ func matchesPredicate(pod *api.Pod, nodeInfo *schedulercache.NodeInfo) (bool, er
 	return false, algorithmpredicates.ErrFakePredicate
 }
 
-func hasNoPodsPredicate(pod *api.Pod, nodeInfo *schedulercache.NodeInfo) (bool, error) {
+func hasNoPodsPredicate(pod *api.Pod, meta interface{}, nodeInfo *schedulercache.NodeInfo) (bool, error) {
 	if len(nodeInfo.Pods()) == 0 {
 		return true, nil
 	}
@@ -114,7 +113,7 @@ func makeNodeList(nodeNames []string) api.NodeList {
 }
 
 func TestSelectHost(t *testing.T) {
-	scheduler := genericScheduler{random: rand.New(rand.NewSource(0))}
+	scheduler := genericScheduler{}
 	tests := []struct {
 		list          schedulerapi.HostPriorityList
 		possibleHosts sets.String
@@ -277,7 +276,6 @@ func TestGenericScheduler(t *testing.T) {
 		},
 	}
 	for _, test := range tests {
-		random := rand.New(rand.NewSource(0))
 		cache := schedulercache.New(time.Duration(0), wait.NeverStop)
 		for _, pod := range test.pods {
 			cache.AddPod(pod)
@@ -285,7 +283,7 @@ func TestGenericScheduler(t *testing.T) {
 		for _, name := range test.nodes {
 			cache.AddNode(&api.Node{ObjectMeta: api.ObjectMeta{Name: name}})
 		}
-		scheduler := NewGenericScheduler(cache, test.predicates, test.prioritizers, []algorithm.SchedulerExtender{}, random)
+		scheduler := NewGenericScheduler(cache, test.predicates, test.prioritizers, []algorithm.SchedulerExtender{})
 		machine, err := scheduler.Schedule(test.pod, algorithm.FakeNodeLister(makeNodeList(test.nodes)))
 		if test.expectsErr {
 			if err == nil {

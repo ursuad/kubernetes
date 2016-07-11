@@ -1,5 +1,5 @@
 /*
-Copyright 2015 The Kubernetes Authors All rights reserved.
+Copyright 2015 The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -156,6 +156,18 @@ func syncAndValidateDaemonSets(t *testing.T, manager *DaemonSetsController, ds *
 	}
 	manager.syncHandler(key)
 	validateSyncDaemonSets(t, podControl, expectedCreates, expectedDeletes)
+}
+
+func TestDeleteFinalStateUnknown(t *testing.T) {
+	manager, _ := newTestController()
+	addNodes(manager.nodeStore.Store, 0, 1, nil)
+	ds := newDaemonSet("foo")
+	// DeletedFinalStateUnknown should queue the embedded DS if found.
+	manager.deleteDaemonset(cache.DeletedFinalStateUnknown{Key: "foo", Obj: ds})
+	enqueuedKey, _ := manager.queue.Get()
+	if enqueuedKey.(string) != "default/foo" {
+		t.Errorf("expected delete of DeletedFinalStateUnknown to enqueue the daemonset but found: %#v", enqueuedKey)
+	}
 }
 
 // DaemonSets without node selectors should launch pods on every node.

@@ -1,5 +1,5 @@
 /*
-Copyright 2014 The Kubernetes Authors All rights reserved.
+Copyright 2014 The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -119,12 +119,16 @@ func MaxInFlightLimit(c chan bool, longRunningRequestCheck LongRunningRequestChe
 			defer func() { <-c }()
 			handler.ServeHTTP(w, r)
 		default:
-			tooManyRequests(w)
+			tooManyRequests(r, w)
 		}
 	})
 }
 
-func tooManyRequests(w http.ResponseWriter) {
+func tooManyRequests(req *http.Request, w http.ResponseWriter) {
+	// "Too Many Requests" response is returned before logger is setup for the request.
+	// So we need to explicitly log it here.
+	defer httplog.NewLogged(req, &w).Log()
+
 	// Return a 429 status indicating "Too Many Requests"
 	w.Header().Set("Retry-After", RetryAfter)
 	http.Error(w, "Too many requests, please try again later.", errors.StatusTooManyRequests)

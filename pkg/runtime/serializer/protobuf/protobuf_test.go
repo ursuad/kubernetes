@@ -1,5 +1,5 @@
 /*
-Copyright 2015 The Kubernetes Authors All rights reserved.
+Copyright 2015 The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -323,7 +323,7 @@ func TestDecodeObjects(t *testing.T) {
 	}
 
 	for i, test := range testCases {
-		s := protobuf.NewSerializer(api.Scheme, runtime.ObjectTyperToTyper(api.Scheme), "application/protobuf")
+		s := protobuf.NewSerializer(api.Scheme, api.Scheme, "application/protobuf")
 		obj, err := runtime.Decode(s, test.data)
 
 		switch {

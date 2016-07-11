@@ -1,5 +1,5 @@
 /*
-Copyright 2014 The Kubernetes Authors All rights reserved.
+Copyright 2014 The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -142,8 +142,8 @@ func (_ *fakeKubelet) GetContainerInfoV2(_ string, _ cadvisorapiv2.RequestOption
 	return nil, nil
 }
 
-func (_ *fakeKubelet) DockerImagesFsInfo() (cadvisorapiv2.FsInfo, error) {
-	return cadvisorapiv2.FsInfo{}, fmt.Errorf("Unsupported Operation DockerImagesFsInfo")
+func (_ *fakeKubelet) ImagesFsInfo() (cadvisorapiv2.FsInfo, error) {
+	return cadvisorapiv2.FsInfo{}, fmt.Errorf("Unsupported Operation ImagesFsInfo")
 }
 
 func (_ *fakeKubelet) RootFsInfo() (cadvisorapiv2.FsInfo, error) {

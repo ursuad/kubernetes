@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Copyright 2014 The Kubernetes Authors All rights reserved.
+# Copyright 2014 The Kubernetes Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -23,25 +23,53 @@ source "${KUBE_ROOT}/cluster/gce/${KUBE_CONFIG_FILE-"config-default.sh"}"
 source "${KUBE_ROOT}/cluster/common.sh"
 source "${KUBE_ROOT}/cluster/lib/util.sh"
 
-if [[ "${OS_DISTRIBUTION}" == "debian" || "${OS_DISTRIBUTION}" == "coreos" || "${OS_DISTRIBUTION}" == "trusty" ]]; then
+if [[ "${OS_DISTRIBUTION}" == "debian" || "${OS_DISTRIBUTION}" == "coreos" || "${OS_DISTRIBUTION}" == "trusty" || "${OS_DISTRIBUTION}" == "gci" ]]; then
   source "${KUBE_ROOT}/cluster/gce/${OS_DISTRIBUTION}/helper.sh"
-elif [[ "${OS_DISTRIBUTION}" == "gci" ]]; then
-  # TODO(andyzheng0831): Switch to use the GCI specific code.
-  source "${KUBE_ROOT}/cluster/gce/trusty/helper.sh"
-  MASTER_IMAGE_PROJECT="google-containers"
-  # If choosing "gci" disto, at least the cluster master needs to run on GCI image.
-  # If the user does not set a GCI image for master, we run both master and nodes
-  # using the latest GCI dev image.
-  if [[ "${MASTER_IMAGE}" != gci* ]]; then
-    gci_images=( $(gcloud compute images list --project google-containers \
-      --regexp='gci-dev.*' --format='value(name)') )
-    MASTER_IMAGE="${gci_images[0]}"
-    NODE_IMAGE="${MASTER_IMAGE}"
-    NODE_IMAGE_PROJECT="${MASTER_IMAGE_PROJECT}"
-  fi
 else
   echo "Cannot operate on cluster using os distro: ${OS_DISTRIBUTION}" >&2
   exit 1
+fi
+
+function get_latest_gci_image() {
+  # GCI milestone to use
+  GCI_MILESTONE="53"
+
+  # First try to find an active (non-deprecated) image on this milestone.
+  gci_images=( $(gcloud compute images list --project google-containers \
+      --no-standard-images --sort-by="~creationTimestamp" \
+      --regexp="gci-[a-z]+-${GCI_MILESTONE}-.*" --format="table[no-heading](name)") )
+
+  # If no active image is available, search across all deprecated images.
+  if [[ ${#gci_images[@]} == 0 ]] ; then
+    gci_images=( $(gcloud compute images list --project google-containers \
+        --no-standard-images --show-deprecated --sort-by="~creationTimestamp" \
+        --regexp="gci-[a-z]+-${GCI_MILESTONE}-.*" --format="table[no-heading](name)") )
+  fi
+
+  echo "${gci_images[0]}"
+}
+
+if [[ "${OS_DISTRIBUTION}" == "gci" ]]; then
+  # If the master image is not set, we use the pinned GCI image.
+  # Otherwise, we respect whatever is set by the user.
+  MASTER_IMAGE=${KUBE_GCE_MASTER_IMAGE:-"$(get_latest_gci_image)"}
+  MASTER_IMAGE_PROJECT=${KUBE_GCE_MASTER_PROJECT:-google-containers}
+  # The default node image when using GCI is still the Debian based ContainerVM
+  # until GCI gets validated for node usage.
+  NODE_IMAGE=${KUBE_GCE_NODE_IMAGE:-${CVM_VERSION}}
+  NODE_IMAGE_PROJECT=${KUBE_GCE_NODE_PROJECT:-google-containers}
+fi
+
+# Verfiy cluster autoscaler configuration.
+if [[ "${ENABLE_CLUSTER_AUTOSCALER}" == "true" ]]; then
+  if [ -z $AUTOSCALER_MIN_NODES ]; then
+    echo "AUTOSCALER_MIN_NODES not set."
+    exit 1
+  fi
+  if [ -z $AUTOSCALER_MAX_NODES ]; then
+    echo "AUTOSCALER_MAX_NODES not set."
+    exit 1
+  fi
 fi
 
 NODE_INSTANCE_PREFIX="${INSTANCE_PREFIX}-minion"
@@ -178,6 +206,10 @@ function set-preferred-region() {
     KUBE_ADDON_REGISTRY="${preferred}.gcr.io/google_containers"
   else
     KUBE_ADDON_REGISTRY="gcr.io/google_containers"
+  fi
+
+  if [[ "${ENABLE_DOCKER_REGISTRY_CACHE:-}" == "true" ]]; then
+    DOCKER_REGISTRY_MIRROR_URL="https://${preferred}-mirror.gcr.io"
   fi
 }
 
@@ -624,6 +656,18 @@ function create-network() {
   fi
 }
 
+# Assumes:
+#   NUM_NODES
+# Sets:
+#   MASTER_ROOT_DISK_SIZE
+function get-master-root-disk-size() {
+  if [[ "${NUM_NODES}" -le "1000" ]]; then
+    export MASTER_ROOT_DISK_SIZE="10"
+  else
+    export MASTER_ROOT_DISK_SIZE="50"
+  fi
+}
+
 function create-master() {
   echo "Starting master and configuring firewalls"
   gcloud compute firewall-rules create "${MASTER_NAME}-https" \
@@ -649,6 +693,14 @@ function create-master() {
       --size "${CLUSTER_REGISTRY_DISK_SIZE}" &
   fi
 
+  # Create disk for influxdb if enabled
+  if [[ "${ENABLE_CLUSTER_MONITORING:-}" == "influxdb" ]]; then
+    gcloud compute disks create "${INSTANCE_PREFIX}-influxdb-pd" \
+      --project "${PROJECT}" \
+      --zone "${ZONE}" \
+      --size "10GiB" &
+  fi
+
   # Generate a bearer token for this cluster. We push this separately
   # from the other cluster variables so that the client (this
   # computer) can forget it later. This should disappear with
@@ -666,6 +718,9 @@ function create-master() {
     --project "${PROJECT}" --region "${REGION}" -q --format='value(address)')
 
   create-certs "${MASTER_RESERVED_IP}"
+
+  # Sets MASTER_ROOT_DISK_SIZE that is used by create-master-instance
+  get-master-root-disk-size
 
   create-master-instance "${MASTER_RESERVED_IP}" &
 }
@@ -750,7 +805,7 @@ function create-nodes() {
         create "${group_name}" \
         --project "${PROJECT}" \
         --zone "${ZONE}" \
-        --base-instance-name "${NODE_INSTANCE_PREFIX}" \
+        --base-instance-name "${group_name}" \
         --size "${this_mig_size}" \
         --template "$template_name" || true;
     gcloud compute instance-groups managed wait-until-stable \
@@ -775,14 +830,14 @@ function create-cluster-autoscaler-mig-config() {
   # must be greater or equal to the number of migs. 
   if [[ ${AUTOSCALER_MIN_NODES} < ${NUM_MIGS} ]]; then
     echo "AUTOSCALER_MIN_NODES must be greater or equal ${NUM_MIGS}"
-    exit 2    
+    exit 2
   fi
 
   # Each MIG must have at least one node, so the min number of nodes
   # must be greater or equal to the number of migs. 
   if [[ ${AUTOSCALER_MAX_NODES} < ${NUM_MIGS} ]]; then
     echo "AUTOSCALER_MAX_NODES must be greater or equal ${NUM_MIGS}"
-    exit 2    
+    exit 2
   fi
 
   # The code assumes that the migs were created with create-nodes 
@@ -808,6 +863,8 @@ function create-cluster-autoscaler-mig-config() {
     local mig_url="https://www.googleapis.com/compute/v1/projects/${PROJECT}/zones/${ZONE}/instanceGroups/${group_name}"
     AUTOSCALER_MIG_CONFIG="${AUTOSCALER_MIG_CONFIG} --nodes=${this_mig_min}:${this_mig_max}:${mig_url}"
   done
+
+  AUTOSCALER_MIG_CONFIG="${AUTOSCALER_MIG_CONFIG} --scale-down-enabled=${AUTOSCALER_ENABLE_SCALE_DOWN}"
 }
 
 # Assumes:
@@ -815,12 +872,12 @@ function create-cluster-autoscaler-mig-config() {
 # - NODE_INSTANCE_PREFIX
 # - PROJECT
 # - ZONE
-# - ENABLE_NODE_AUTOSCALER
+# - ENABLE_CLUSTER_AUTOSCALER
 # - AUTOSCALER_MAX_NODES
 # - AUTOSCALER_MIN_NODES
 function create-autoscaler-config() {
   # Create autoscaler for nodes configuration if requested
-  if [[ "${ENABLE_NODE_AUTOSCALER}" == "true" ]]; then
+  if [[ "${ENABLE_CLUSTER_AUTOSCALER}" == "true" ]]; then
     create-cluster-autoscaler-mig-config
     echo "Using autoscaler config: ${AUTOSCALER_MIG_CONFIG}"
   fi
@@ -867,7 +924,11 @@ function check-cluster() {
   export CONTEXT="${PROJECT}_${INSTANCE_PREFIX}"
   (
    umask 077
+
+   # Update the user's kubeconfig to include credentials for this apiserver.
    create-kubeconfig
+
+   create-kubeconfig-for-federation
   )
 
   # ensures KUBECONFIG is set
@@ -892,27 +953,18 @@ function check-cluster() {
 # API calls and exceeding API quota. It is important to bring down the instances before bringing
 # down the firewall rules and routes.
 function kube-down {
+  local -r batch=200
+
   detect-project
   detect-node-names # For INSTANCE_GROUPS
 
   echo "Bringing down cluster"
   set +e  # Do not stop on error
 
-  # Delete autoscaler for nodes if present. We assume that all or none instance groups have an autoscaler
-  local autoscaler
-  autoscaler=( $(gcloud compute instance-groups managed list \
-    --zone "${ZONE}" --project "${PROJECT}" --regexp="${NODE_INSTANCE_PREFIX}-.+" \
-    --format='value(autoscaled)') )
-  if [[ "${autoscaler:-}" == "yes" ]]; then
-    for group in ${INSTANCE_GROUPS[@]:-}; do
-      gcloud compute instance-groups managed stop-autoscaling "${group}" --zone "${ZONE}" --project "${PROJECT}"
-    done
-  fi
-
   # Get the name of the managed instance group template before we delete the
   # managed instance group. (The name of the managed instance group template may
   # change during a cluster upgrade.)
-  local template=$(get-template "${PROJECT}")
+  local templates=$(get-template "${PROJECT}")
 
   for group in ${INSTANCE_GROUPS[@]:-}; do
     if gcloud compute instance-groups managed describe "${group}" --project "${PROJECT}" --zone "${ZONE}" &>/dev/null; then
@@ -920,16 +972,23 @@ function kube-down {
         --project "${PROJECT}" \
         --quiet \
         --zone "${ZONE}" \
-        "${group}"
+        "${group}" &
     fi
   done
 
-  if gcloud compute instance-templates describe --project "${PROJECT}" "${template}" &>/dev/null; then
-    gcloud compute instance-templates delete \
-      --project "${PROJECT}" \
-      --quiet \
-      "${template}"
-  fi
+  # Wait for last batch of jobs
+  kube::util::wait-for-jobs || {
+    echo -e "Failed to delete instance group(s)." >&2
+  }
+
+  for template in ${templates[@]:-}; do
+    if gcloud compute instance-templates describe --project "${PROJECT}" "${template}" &>/dev/null; then
+      gcloud compute instance-templates delete \
+        --project "${PROJECT}" \
+        --quiet \
+        "${template}"
+    fi
+  done
 
   # First delete the master (if it exists).
   if gcloud compute instances describe "${MASTER_NAME}" --zone "${ZONE}" --project "${PROJECT}" &>/dev/null; then
@@ -969,14 +1028,14 @@ function kube-down {
                 --format='value(name)') )
   # If any minions are running, delete them in batches.
   while (( "${#minions[@]}" > 0 )); do
-    echo Deleting nodes "${minions[*]::10}"
+    echo Deleting nodes "${minions[*]::${batch}}"
     gcloud compute instances delete \
       --project "${PROJECT}" \
       --quiet \
       --delete-disks boot \
       --zone "${ZONE}" \
-      "${minions[@]::10}"
-    minions=( "${minions[@]:10}" )
+      "${minions[@]::${batch}}"
+    minions=( "${minions[@]:${batch}}" )
   done
 
   # Delete firewall rule for the master.
@@ -1007,12 +1066,12 @@ function kube-down {
     --regexp "${TRUNCATED_PREFIX}-.{8}-.{4}-.{4}-.{4}-.{12}"  \
     --format='value(name)') )
   while (( "${#routes[@]}" > 0 )); do
-    echo Deleting routes "${routes[*]::10}"
+    echo Deleting routes "${routes[*]::${batch}}"
     gcloud compute routes delete \
       --project "${PROJECT}" \
       --quiet \
-      "${routes[@]::10}"
-    routes=( "${routes[@]:10}" )
+      "${routes[@]::${batch}}"
+    routes=( "${routes[@]:${batch}}" )
   done
 
   # Delete the master's reserved IP
@@ -1023,6 +1082,15 @@ function kube-down {
       --region "${REGION}" \
       --quiet \
       "${MASTER_NAME}-ip"
+  fi
+
+  # Delete persistent disk for influx-db.
+  if gcloud compute disks describe "${INSTANCE_PREFIX}"-influxdb-pd --zone "${ZONE}" --project "${PROJECT}" &>/dev/null; then
+    gcloud compute disks delete \
+      --project "${PROJECT}" \
+      --quiet \
+      --zone "${ZONE}" \
+      "${INSTANCE_PREFIX}"-influxdb-pd
   fi
 
   export CONTEXT="${PROJECT}_${INSTANCE_PREFIX}"
@@ -1037,7 +1105,7 @@ function kube-down {
 #
 # $1: project
 function get-template {
-  gcloud compute instance-templates list "${NODE_INSTANCE_PREFIX}-template" \
+  gcloud compute instance-templates list -r "${NODE_INSTANCE_PREFIX}-template(-(${KUBE_RELEASE_VERSION_DASHED_REGEX}|${KUBE_CI_VERSION_DASHED_REGEX}))?" \
     --project="${1}" --format='value(name)'
 }
 
@@ -1078,6 +1146,11 @@ function check-resources {
 
   if gcloud compute disks describe --project "${PROJECT}" "${CLUSTER_REGISTRY_DISK}" --zone "${ZONE}" &>/dev/null; then
     KUBE_RESOURCE_FOUND="Persistent disk ${CLUSTER_REGISTRY_DISK}"
+    return 1
+  fi
+
+  if gcloud compute disks describe --project "${PROJECT}" "${INSTANCE_PREFIX}-influxdb-pd" --zone "${ZONE}" &>/dev/null; then
+    KUBE_RESOURCE_FOUND="Persistent disk ${INSTANCE_PREFIX}-influxdb-pd"
     return 1
   fi
 

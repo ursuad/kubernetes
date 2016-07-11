@@ -1,5 +1,5 @@
 /*
-Copyright 2016 The Kubernetes Authors All rights reserved.
+Copyright 2016 The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -636,24 +636,24 @@ func (m *ScheduledJobSpec) MarshalTo(data []byte) (int, error) {
 	i++
 	i = encodeVarintGenerated(data, i, uint64(len(m.ConcurrencyPolicy)))
 	i += copy(data[i:], m.ConcurrencyPolicy)
-	data[i] = 0x20
-	i++
-	if m.Suspend {
-		data[i] = 1
-	} else {
-		data[i] = 0
-	}
-	i++
-	if m.JobTemplate != nil {
-		data[i] = 0x2a
+	if m.Suspend != nil {
+		data[i] = 0x20
 		i++
-		i = encodeVarintGenerated(data, i, uint64(m.JobTemplate.Size()))
-		n19, err := m.JobTemplate.MarshalTo(data[i:])
-		if err != nil {
-			return 0, err
+		if *m.Suspend {
+			data[i] = 1
+		} else {
+			data[i] = 0
 		}
-		i += n19
+		i++
 	}
+	data[i] = 0x2a
+	i++
+	i = encodeVarintGenerated(data, i, uint64(m.JobTemplate.Size()))
+	n19, err := m.JobTemplate.MarshalTo(data[i:])
+	if err != nil {
+		return 0, err
+	}
+	i += n19
 	return i, nil
 }
 
@@ -907,11 +907,11 @@ func (m *ScheduledJobSpec) Size() (n int) {
 	}
 	l = len(m.ConcurrencyPolicy)
 	n += 1 + l + sovGenerated(uint64(l))
-	n += 2
-	if m.JobTemplate != nil {
-		l = m.JobTemplate.Size()
-		n += 1 + l + sovGenerated(uint64(l))
+	if m.Suspend != nil {
+		n += 2
 	}
+	l = m.JobTemplate.Size()
+	n += 1 + l + sovGenerated(uint64(l))
 	return n
 }
 
@@ -2745,7 +2745,8 @@ func (m *ScheduledJobSpec) Unmarshal(data []byte) error {
 					break
 				}
 			}
-			m.Suspend = bool(v != 0)
+			b := bool(v != 0)
+			m.Suspend = &b
 		case 5:
 			if wireType != 2 {
 				return fmt.Errorf("proto: wrong wireType = %d for field JobTemplate", wireType)
@@ -2771,9 +2772,6 @@ func (m *ScheduledJobSpec) Unmarshal(data []byte) error {
 			postIndex := iNdEx + msglen
 			if postIndex > l {
 				return io.ErrUnexpectedEOF
-			}
-			if m.JobTemplate == nil {
-				m.JobTemplate = &JobTemplateSpec{}
 			}
 			if err := m.JobTemplate.Unmarshal(data[iNdEx:postIndex]); err != nil {
 				return err
